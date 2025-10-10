@@ -19,8 +19,8 @@ module PgSearch
         @model.reflect_on_association(@name).table_name
       end
 
-      def join(primary_key)
-        "LEFT OUTER JOIN (#{relation(primary_key).to_sql}) #{subselect_alias} ON #{subselect_alias}.id = #{primary_key}"
+      def join(primary_key, &block)
+        "LEFT OUTER JOIN (#{relation(primary_key, &block).to_sql}) #{subselect_alias} ON #{subselect_alias}.id = #{primary_key}"
       end
 
       def subselect_alias
@@ -49,9 +49,13 @@ module PgSearch
         end.join(", ")
       end
 
-      def relation(primary_key)
+      def relation(primary_key, &block)
         result = @model.unscoped.joins(@name).select("#{primary_key} AS id, #{selects}")
         result = result.group(primary_key) unless singular_association?
+
+        # Apply optional scoping block to associated relation
+        result = block.call(result) if block_given?
+
         result
       end
 

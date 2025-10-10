@@ -16,6 +16,9 @@ module PgSearch
       scope = include_table_aliasing_for_rank(scope)
       rank_table_alias = scope.pg_search_rank_table_alias(include_counter: true)
 
+      # Apply block to outer scope also
+      scope = block.call(scope) if block_given?
+
       scope
         .joins(rank_join(rank_table_alias, &block))
         .order(Arel.sql("#{rank_table_alias}.rank DESC, #{order_within_rank}"))
@@ -79,17 +82,21 @@ module PgSearch
 
     delegate :connection, :quoted_table_name, to: :model
 
-    def subquery
-      relation = model
-        .unscoped
+    def subquery(&block)
+      # Start with base model
+      relation = model.unscoped
+
+      # Apply block FIRST to filter the base relation before joins
+       relation = block.call(relation) if block_given?
+
+      # Then add selects, joins, and search conditions
+      relation
         .select("#{primary_key} AS pg_search_id")
         .select("#{rank} AS rank")
-        .joins(subquery_join)
+        .joins(subquery_join(&block))
         .where(conditions)
         .limit(nil)
         .offset(nil)
-
-      block_given? ? yield(relation) : relation
     end
 
     def conditions
@@ -128,10 +135,10 @@ module PgSearch
       "#{quoted_table_name}.#{connection.quote_column_name(model.primary_key)}"
     end
 
-    def subquery_join
+    def subquery_join(&block)
       if config.associations.any?
         config.associations.map do |association|
-          association.join(primary_key)
+          association.join(primary_key, &block)
         end.join(" ")
       end
     end
