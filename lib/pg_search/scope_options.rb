@@ -79,12 +79,12 @@ module PgSearch
 
     delegate :connection, :quoted_table_name, to: :model
 
-    def subquery
+    def subquery(&block)
       relation = model
         .unscoped
         .select("#{primary_key} AS pg_search_id")
         .select("#{rank} AS rank")
-        .joins(subquery_join)
+        .joins(subquery_join(&block))
         .where(conditions)
         .limit(nil)
         .offset(nil)
@@ -128,10 +128,10 @@ module PgSearch
       "#{quoted_table_name}.#{connection.quote_column_name(model.primary_key)}"
     end
 
-    def subquery_join
+    def subquery_join(&block)
       if config.associations.any?
         config.associations.map do |association|
-          association.join(primary_key)
+          association.join(primary_key, &block)
         end.join(" ")
       end
     end
