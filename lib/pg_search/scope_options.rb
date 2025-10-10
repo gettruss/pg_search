@@ -83,16 +83,20 @@ module PgSearch
     delegate :connection, :quoted_table_name, to: :model
 
     def subquery(&block)
-      relation = model
-        .unscoped
+      # Start with base model
+      relation = model.unscoped
+
+      # Apply block FIRST to filter the base relation before joins
+       relation = block.call(relation) if block_given?
+
+      # Then add selects, joins, and search conditions
+      relation
         .select("#{primary_key} AS pg_search_id")
         .select("#{rank} AS rank")
         .joins(subquery_join(&block))
         .where(conditions)
         .limit(nil)
         .offset(nil)
-
-      block_given? ? yield(relation) : relation
     end
 
     def conditions
