@@ -13,17 +13,27 @@ module PgSearch
     end
 
     def apply(scope, &block)
-      scope = include_table_aliasing_for_rank(scope)
-      rank_table_alias = scope.pg_search_rank_table_alias(include_counter: true)
+      # Add association joins inline (not in subquery)
+      scope = scope.joins(Arel.sql(subquery_join(&block))) if config.associations.any?
 
-      # Apply block to outer scope also
+      # Add inline rank calculation as a SELECT
+      scope = scope.select("#{model.quoted_table_name}.*")
+      scope = scope.select("(#{rank}) AS pg_search_rank")
+
+      # Wrap search conditions in Arel Grouping to ensure proper parentheses
+      grouped_conditions = Arel::Nodes::Grouping.new(conditions)
+      scope = scope.where(grouped_conditions)
+
+      # Apply block for isolation LAST
+      # This ensures isolation wraps the entire search condition
       scope = block.call(scope) if block_given?
 
-      scope
-        .joins(rank_join(rank_table_alias, &block))
-        .order(Arel.sql("#{rank_table_alias}.rank DESC, #{order_within_rank}"))
-        .extend(WithPgSearchRank)
-        .extend(WithPgSearchHighlight[feature_for(:tsearch)])
+      # Order by inline rank
+      scope = scope.order(Arel.sql("pg_search_rank DESC, #{order_within_rank}"))
+
+      # Extend with modules for compatibility
+      scope.extend(WithPgSearchRank)
+      scope.extend(WithPgSearchHighlight[feature_for(:tsearch)])
     end
 
     module WithPgSearchHighlight
@@ -52,9 +62,8 @@ module PgSearch
 
     module WithPgSearchRank
       def with_pg_search_rank
-        scope = self
-        scope = scope.select("#{table_name}.*") unless scope.select_values.any?
-        scope.select("#{pg_search_rank_table_alias}.rank AS pg_search_rank")
+        # Rank is already added inline by apply(), just return self
+        self
       end
     end
 
@@ -86,8 +95,13 @@ module PgSearch
       # Start with base model
       relation = model.unscoped
 
-      # Apply block FIRST to filter the base relation before joins
-       relation = block.call(relation) if block_given?
+      # If a block is given, wrap the base table in a subselect to force early filtering
+      # This prevents PostgreSQL from doing full table scans on large tables
+      if block_given?
+        filtered_relation = block.call(model.unscoped)
+        # Use from() to replace the FROM clause with a filtered subquery
+        relation = relation.from("(#{filtered_relation.to_sql}) AS #{model.table_name}")
+      end
 
       # Then add selects, joins, and search conditions
       relation
