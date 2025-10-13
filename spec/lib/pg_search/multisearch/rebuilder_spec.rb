@@ -277,6 +277,47 @@ describe PgSearch::Multisearch::Rebuilder do
             expect(record_2.reload.pg_search_document.additional_attribute_column).to eq("Model::2")
           end
         end
+
+        context "when the model has STI and is the base class" do
+          with_model :StiBaseModel do
+            table do |t|
+              t.string :type
+              t.string :name
+            end
+
+            model do
+              include PgSearch::Model
+
+              multisearchable against: :name
+            end
+          end
+
+          before do
+            # Create a subclass
+            subclass = Class.new(StiBaseModel)
+            stub_const("StiSubModel", subclass)
+          end
+
+          it "generates SQL with STI clause including base class condition" do
+            time = Time.utc(2001, 1, 1, 0, 0, 0)
+            rebuilder = described_class.new(StiBaseModel, -> { time })
+
+            # The base class should include "type IS NULL OR" in the WHERE clause
+            expected_sql_fragment = %{WHERE type IS NULL OR type = 'StiBaseModel'}
+
+            executed_sql = []
+
+            notifier = ActiveSupport::Notifications.subscribe("sql.active_record") do |_name, _start, _finish, _id, payload|
+              executed_sql << payload[:sql] if payload[:sql].include?(%(INSERT INTO "pg_search_documents"))
+            end
+
+            rebuilder.rebuild
+            ActiveSupport::Notifications.unsubscribe(notifier)
+
+            expect(executed_sql.length).to eq(1)
+            expect(executed_sql.first).to include(expected_sql_fragment)
+          end
+        end
       end
 
       context "when multisearchable is conditional" do

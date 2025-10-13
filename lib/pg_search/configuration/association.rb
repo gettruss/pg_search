@@ -19,8 +19,8 @@ module PgSearch
         @model.reflect_on_association(@name).table_name
       end
 
-      def join(primary_key)
-        "LEFT OUTER JOIN (#{relation(primary_key).to_sql}) #{subselect_alias} ON #{subselect_alias}.id = #{primary_key}"
+      def join(primary_key, &block)
+        "LEFT OUTER JOIN (#{relation(primary_key, &block).to_sql}) #{subselect_alias} ON #{subselect_alias}.id = #{primary_key}"
       end
 
       def subselect_alias
@@ -49,14 +49,58 @@ module PgSearch
         end.join(", ")
       end
 
-      def relation(primary_key)
+      def relation(primary_key, &block)
         result = @model.unscoped.joins(@name).select("#{primary_key} AS id, #{selects}")
         result = result.group(primary_key) unless singular_association?
+
+        # Apply optional tenant scoping block to associated relation
+        # Example: { |rel| rel.where(tenant_id: current_tenant.id) }
+        if block_given?
+          begin
+            original_where_count = count_where_conditions(result)
+            result = block.call(result)
+            new_where_count = count_where_conditions(result)
+
+            # Verify tenant scoping actually added filtering to association, if a block was added we should infact see extra clauses chained
+            if new_where_count <= original_where_count
+              raise SecurityError, "Association tenant scoping must add WHERE conditions for #{@name}"
+            end
+          rescue SecurityError
+            raise # Re-raise security errors
+          rescue => e
+            # Never allow association queries without tenant isolation when explicit block is passed down
+            raise SecurityError, "Association tenant scoping failed for #{@name}: #{e.message}"
+          end
+        end
+
         result
       end
 
       def singular_association?
         %i[has_one belongs_to].include?(@model.reflect_on_association(@name).macro)
+      end
+
+      def count_where_conditions(scope)
+        # Handle test mocks and edge cases where where_clause might not be available
+        return 0 unless scope.respond_to?(:where_clause)
+
+        where_clause = scope.where_clause
+        return 0 if where_clause.nil?
+
+        ast = where_clause.ast
+        return 0 if ast.nil?
+
+        case ast
+        when Arel::Nodes::And
+          # AND node has multiple conditions
+          ast.children.count
+        when Arel::Nodes::Or
+          # OR node has multiple conditions
+          ast.children.count
+        else
+          # Single condition (Equality, etc.)
+          1
+        end
       end
     end
   end
