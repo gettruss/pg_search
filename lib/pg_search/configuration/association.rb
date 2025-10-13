@@ -53,7 +53,8 @@ module PgSearch
         result = @model.unscoped.joins(@name).select("#{primary_key} AS id, #{selects}")
         result = result.group(primary_key) unless singular_association?
 
-        # Apply optional scoping block to associated relation
+        # Apply optional tenant scoping block to associated relation
+        # Example: { |rel| rel.where(tenant_id: current_tenant.id) }
         result = block.call(result) if block_given?
 
         result

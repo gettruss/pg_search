@@ -13,27 +13,59 @@ module PgSearch
     end
 
     def apply(scope, &block)
+      if block_given?
+        # New inline approach for tenant scoping
+        apply_with_tenant_scoping(scope, &block)
+      else
+        # Original subquery approach for backward compatibility
+        apply_original(scope)
+      end
+    end
+
+    private
+
+    def apply_with_tenant_scoping(scope, &block)
       # Add association joins inline (not in subquery)
       scope = scope.joins(Arel.sql(subquery_join(&block))) if config.associations.any?
 
-      # Add inline rank calculation as a SELECT
-      scope = scope.select("#{model.quoted_table_name}.*")
-      scope = scope.select("(#{rank}) AS pg_search_rank")
+      # Only select all columns if no columns were explicitly selected
+      if !scope.respond_to?(:select_values) || scope.select_values.empty?
+        scope = scope.select("#{model.quoted_table_name}.*")
+      end
+      # If columns were explicitly selected, preserve them as-is
 
       # Wrap search conditions in Arel Grouping to ensure proper parentheses
       grouped_conditions = Arel::Nodes::Grouping.new(conditions)
       scope = scope.where(grouped_conditions)
 
-      # Apply block for isolation LAST
-      # This ensures isolation wraps the entire search condition
-      scope = block.call(scope) if block_given?
+      # Apply tenant scoping block for isolation LAST
+      # Example: { |rel| rel.where(tenant_id: current_tenant.id) }
+      scope = block.call(scope)
 
-      # Order by inline rank
-      scope = scope.order(Arel.sql("pg_search_rank DESC, #{order_within_rank}"))
+      # Order by primary key only - rank ordering will be added by with_pg_search_rank
+      scope = scope.order(Arel.sql("#{order_within_rank}"))
+
+      # Inject rank and order expressions into the scope for the inline module to use
+      rank_expression = rank
+      order_expression = order_within_rank
+
+      scope.define_singleton_method(:pg_search_rank_expression) { rank_expression }
+      scope.define_singleton_method(:pg_search_order_within_rank) { order_expression }
 
       # Extend with modules for compatibility
-      scope.extend(WithPgSearchRank)
+      scope.extend(WithPgSearchRankInline)
       scope.extend(WithPgSearchHighlight[feature_for(:tsearch)])
+    end
+
+    def apply_original(scope)
+      scope = include_table_aliasing_for_rank(scope)
+      rank_table_alias = scope.pg_search_rank_table_alias(include_counter: true)
+
+      scope
+        .joins(rank_join(rank_table_alias))
+        .order(Arel.sql("#{rank_table_alias}.rank DESC, #{order_within_rank}"))
+        .extend(WithPgSearchRank)
+        .extend(WithPgSearchHighlight[feature_for(:tsearch)])
     end
 
     module WithPgSearchHighlight
@@ -62,8 +94,30 @@ module PgSearch
 
     module WithPgSearchRank
       def with_pg_search_rank
-        # Rank is already added inline by apply(), just return self
-        self
+        # Check if we're using inline approach (has pg_search_rank already selected)
+        if select_values.any? && select_values.any? { |v| v.to_s.include?('pg_search_rank') }
+          # Inline approach - rank is already added
+          self
+        else
+          # Original subquery approach - need to add rank from subquery table
+          scope = self
+          scope = scope.select("#{table_name}.*") unless scope.select_values.any?
+          scope.select("#{pg_search_rank_table_alias}.rank AS pg_search_rank")
+        end
+      end
+    end
+
+    module WithPgSearchRankInline
+      def with_pg_search_rank
+        scope = self
+
+        # Add inline rank calculation using the injected expression
+        scope = scope.select("(#{pg_search_rank_expression}) AS pg_search_rank")
+
+        # Replace the order clause to include rank ordering
+        scope = scope.reorder(Arel.sql("pg_search_rank DESC, #{pg_search_order_within_rank}"))
+
+        scope
       end
     end
 
