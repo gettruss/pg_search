@@ -40,7 +40,21 @@ module PgSearch
 
       # Apply tenant scoping block for isolation LAST
       # Example: { |rel| rel.where(tenant_id: current_tenant.id) }
-      scope = block.call(scope)
+      begin
+        original_where_count = count_where_conditions(scope)
+        scope = block.call(scope)
+        new_where_count = count_where_conditions(scope)
+
+        # Verify tenant scoping actually added filtering to association, if a block was added we should infact see extra clauses chained
+        if new_where_count <= original_where_count
+          raise SecurityError, "Tenant scoping block must add WHERE conditions for security"
+        end
+      rescue SecurityError
+        raise # bubble up
+      rescue => e
+        # Never allow association queries without tenant isolation when explicit block is passed down
+        raise SecurityError, "Tenant scoping failed: #{e.message}. Query blocked for security."
+      end
 
       # Order by primary key only - rank ordering will be added by with_pg_search_rank
       scope = scope.order(Arel.sql("#{order_within_rank}"))
@@ -249,6 +263,29 @@ module PgSearch
 
       scope.all.spawn.tap do |new_scope|
         new_scope.instance_eval { extend PgSearchRankTableAliasing }
+      end
+    end
+
+    def count_where_conditions(scope)
+      # Handle test mocks and edge cases where where_clause might not be available
+      return 0 unless scope.respond_to?(:where_clause)
+
+      where_clause = scope.where_clause
+      return 0 if where_clause.nil?
+
+      ast = where_clause.ast
+      return 0 if ast.nil?
+
+      case ast
+      when Arel::Nodes::And
+        # AND node has multiple conditions
+        ast.children.count
+      when Arel::Nodes::Or
+        # OR node has multiple conditions
+        ast.children.count
+      else
+        # Single condition (Equality, etc.)
+        1
       end
     end
   end

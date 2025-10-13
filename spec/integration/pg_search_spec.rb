@@ -1905,8 +1905,14 @@ describe "an Active Record model which includes PgSearch" do
       # Create a mock scope that doesn't respond to select_values
       record = ModelWithPgSearch.create!(content: "no select values")
 
+      # Create a mock where_clause for the security checks
+      mock_where_clause = double("MockWhereClause")
+      allow(mock_where_clause).to receive(:ast).and_return(nil)
+
       mock_scope = double("MockScope")
       allow(mock_scope).to receive(:respond_to?).with(:select_values).and_return(false)
+      allow(mock_scope).to receive(:respond_to?).with(:where_clause).and_return(true)
+      allow(mock_scope).to receive(:where_clause).and_return(mock_where_clause)
       allow(mock_scope).to receive(:select).and_return(mock_scope)
       allow(mock_scope).to receive(:where).and_return(mock_scope)
       allow(mock_scope).to receive(:order).and_return(mock_scope)
@@ -1918,8 +1924,17 @@ describe "an Active Record model which includes PgSearch" do
       scope_options = PgSearch::ScopeOptions.new(config)
 
       # This should hit the "!scope.respond_to?(:select_values)" branch
+      # The block needs to add a WHERE condition or security check will fail
       expect {
-        scope_options.send(:apply_with_tenant_scoping, mock_scope) { |rel| rel }
+        scope_options.send(:apply_with_tenant_scoping, mock_scope) do |rel|
+          # Mock that the tenant scoping block adds a WHERE condition
+          mock_where_clause_after = double("MockWhereClauseAfter")
+          allow(mock_where_clause_after).to receive(:ast).and_return(
+            Arel::Nodes::Equality.new(Arel::Nodes::SqlLiteral.new("tenant_id"), Arel::Nodes::SqlLiteral.new("1"))
+          )
+          allow(rel).to receive(:where_clause).and_return(mock_where_clause_after)
+          rel
+        end
       }.not_to raise_error
     end
   end
